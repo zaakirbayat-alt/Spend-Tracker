@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Ledger Tape</title>
+
+<meta name="theme-color" content="#173229" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Ledger" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="./icon.svg" />
+
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+
+<style>
+  html, body { margin: 0; padding: 0; }
+  .torn-edge {
+    height: 10px;
+    width: 100%;
+    background-image:
+      linear-gradient(-45deg, var(--tape-color) 8px, transparent 0) 0 -4px,
+      linear-gradient(45deg, var(--tape-color) 8px, transparent 0) 0 -4px;
+    background-repeat: repeat-x;
+    background-size: 16px 16px;
+    background-position: bottom;
+  }
+  .scan-line {
+    position: absolute;
+    left: 0; right: 0; top: 0;
+    height: 2px;
+    background: #BE7A2E;
+    box-shadow: 0 0 8px #BE7A2E;
+    animation: scanLine 1.6s linear infinite;
+  }
+  @keyframes scanLine { 0% { top: 0%; } 100% { top: 100%; } }
+  @keyframes stampIn {
+    0% { transform: scale(2.2) rotate(-6deg); opacity: 0; }
+    60% { transform: scale(0.9) rotate(-6deg); opacity: 1; }
+    100% { transform: scale(1) rotate(-6deg); opacity: 1; }
+  }
+  @keyframes sheetUp {
+    from { transform: translateY(24px); opacity: 0.6; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  button:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid #BE7A2E;
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .scan-line, .stamp-pop, .sheet-anim { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root">
+  <div style="padding:24px;font-family:system-ui,sans-serif;color:#8A8370;">Loading Ledger Tape…</div>
+</div>
+
+<script>
+  window.addEventListener("error", function (e) {
+    var el = document.getElementById("root");
+    if (el && !el.dataset.mounted) {
+      el.innerHTML =
+        '<div style="padding:24px;font-family:system-ui,sans-serif;color:#8B3A3A;">' +
+        "Something didn't load correctly: " + (e.message || "unknown error") +
+        "<br/><br/>Try refreshing, or check that all three files (index.html, manifest.json, icon.svg) uploaded correctly.</div>";
+    }
+  });
+</script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel-source" id="app-source">
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ---------- localStorage-backed storage shim (mirrors the Claude artifact storage API) ----------
+window.storage = {
+  get: async (key) => {
+    const raw = localStorage.getItem(key);
+    if (raw === null) throw new Error("not found");
+    return { key, value: raw };
+  },
+  set: async (key, value) => {
+    localStorage.setItem(key, value);
+    return { key, value };
+  },
+  delete: async (key) => {
+    localStorage.removeItem(key);
+    return { key, deleted: true };
+  },
+};
+
+// ---------- Design tokens ----------
+const DARK = "#173229";
+const PAPER = "#F6F1E4";
+const CARD = "#FCFAF2";
+const INK = "#212B20";
+const MUTED = "#8A8370";
+const RULE = "#DDD6BD";
+const AMBER = "#BE7A2E";
+const RUST = "#8B3A3A";
+const FONT_BODY = "'IBM Plex Sans', system-ui, -apple-system, sans-serif";
+const FONT_MONO = "'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace";
+
+// ---------- Hand-drawn icon set (no external icon library needed) ----------
+function IconCamera({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M4 8h3l2-2h6l2 2h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="14" r="3.5"/>
+  </svg>);
+}
+function IconPencil({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M4 20l1-4 12-12 3 3-12 12-4 1z"/><path d="M14 6l3 3"/>
+  </svg>);
+}
+function IconTrash({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M4 7h16"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/>
+  </svg>);
+}
+function IconX({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" style={style}>
+    <path d="M5 5l14 14M19 5L5 19"/>
+  </svg>);
+}
+function IconReceipt({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M6 3h12v17l-2-1.3L14 20l-2-1.3L10 20l-2-1.3L6 20V3z"/><path d="M9 8h6M9 12h6M9 16h3"/>
+  </svg>);
+}
+function IconUtensils({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M7 3v7a2 2 0 0 0 2 2v9"/><path d="M7 3v4M9 3v4"/><path d="M17 3c-1.5 0-3 2-3 5s1 5 1 5v8"/>
+  </svg>);
+}
+function IconCart({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M3 4h2l2.4 12.2a2 2 0 0 0 2 1.8h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9" cy="20" r="1.3"/><circle cx="17" cy="20" r="1.3"/>
+  </svg>);
+}
+function IconCar({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M4 16V11l2-5h12l2 5v5"/><path d="M4 16h16"/><circle cx="7.5" cy="16.5" r="1.6"/><circle cx="16.5" cy="16.5" r="1.6"/>
+  </svg>);
+}
+function IconBag({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M6 8h12l-1 12a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1L6 8z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>
+  </svg>);
+}
+function IconPlay({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <circle cx="12" cy="12" r="9"/><path d="M10 8.5l6 3.5-6 3.5v-7z" fill="currentColor" stroke="none"/>
+  </svg>);
+}
+function IconHeart({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <path d="M12 20s-7-4.5-9.3-9A5 5 0 0 1 12 6a5 5 0 0 1 9.3 5c-2.3 4.5-9.3 9-9.3 9z"/>
+  </svg>);
+}
+function IconPlane({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" style={style}>
+    <path d="M3 12l18-8-6 8 6 8-18-8z"/><path d="M3 12h9"/>
+  </svg>);
+}
+function IconDots({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={style}>
+    <circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>
+  </svg>);
+}
+function IconKey({ size = 16, style }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+    <circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/>
+  </svg>);
+}
+function IconLoader({ size = 16, style, className }) {
+  return (<svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" style={style} className={className}>
+    <path d="M12 3a9 9 0 1 0 9 9"/>
+  </svg>);
+}
+
+const CATEGORIES = [
+  { key: "food", label: "Food & Drink", icon: IconUtensils, color: "#A8562A" },
+  { key: "groceries", label: "Groceries", icon: IconCart, color: "#3F6B4E" },
+  { key: "transport", label: "Transport", icon: IconCar, color: "#365E7A" },
+  { key: "shopping", label: "Shopping", icon: IconBag, color: "#7B4B8A" },
+  { key: "bills", label: "Bills & Utilities", icon: IconReceipt, color: "#8B3A3A" },
+  { key: "entertainment", label: "Entertainment", icon: IconPlay, color: "#B08A2E" },
+  { key: "health", label: "Health", icon: IconHeart, color: "#4A7A68" },
+  { key: "travel", label: "Travel", icon: IconPlane, color: "#2E6E77" },
+  { key: "other", label: "Other", icon: IconDots, color: "#6B6456" },
+];
+const CATEGORY_MAP = CATEGORIES.reduce((m, c) => ((m[c.key] = c), m), {});
+const CURRENCIES = ["R", "$", "\u20AC", "\u00A3", "\u20B9", "\u00A5"];
+
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function makeId() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "tx_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+}
+function formatMoney(amount, symbol) {
+  const n = Number(amount || 0);
+  return symbol + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function dateLabel(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const cmp = new Date(d); cmp.setHours(0, 0, 0, 0);
+  if (cmp.getTime() === today.getTime()) return "Today";
+  if (cmp.getTime() === yesterday.getTime()) return "Yesterday";
+  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: d.getFullYear() !== today.getFullYear() ? "numeric" : undefined });
+}
+function getExtractionPrompt() {
+  const today = todayStr();
+  const catList = CATEGORIES.map((c) => c.key).join(", ");
+  return `Look at this image of a receipt, invoice, or payment screenshot. Extract the transaction and respond with ONLY a raw JSON object \u2014 no markdown fences, no explanation, no extra text. Use exactly this shape:
+{"merchant": string, "amount": number, "date": "YYYY-MM-DD", "category": one of [${catList}], "note": string}
+Rules:
+- "amount" is the final total amount as a plain number, no currency symbol or commas.
+- If this is a receipt with multiple line items, use the grand total, not a single line item.
+- "date" is the transaction date if visible; otherwise use "${today}".
+- "category" must be exactly one of: ${catList}. Pick the closest match.
+- "note" is a short optional detail. Use an empty string if nothing useful.
+- If you truly cannot find an amount, set "amount" to 0.`;
+}
+
+async function scanReceiptImage(dataUrl, apiKey) {
+  if (!apiKey) throw new Error("NO_KEY");
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/.exec(dataUrl);
+  if (!match) throw new Error("Unsupported image format");
+  const mediaType = match[1];
+  const base64 = match[2];
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-5",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
+        { type: "text", text: getExtractionPrompt() },
+      ]}],
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error("Request failed: " + res.status + " " + body.slice(0, 200));
+  }
+  const json = await res.json();
+  const textBlock = (json.content || []).find((b) => b.type === "text");
+  if (!textBlock) throw new Error("No text returned");
+  const cleaned = textBlock.text.replace(/```json/gi, "").replace(/```/g, "").trim();
+  return JSON.parse(cleaned);
+}
+
+function normalizeExtracted(raw) {
+  let amount = typeof raw.amount === "number" ? raw.amount : parseFloat(String(raw.amount || "").replace(/[^0-9.]/g, ""));
+  if (isNaN(amount)) amount = 0;
+  const category = CATEGORY_MAP[raw.category] ? raw.category : "other";
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(raw.date || "") ? raw.date : todayStr();
+  const merchant = (raw.merchant || "").toString().slice(0, 60) || "Scanned purchase";
+  const note = (raw.note || "").toString().slice(0, 80);
+  return { amount, category, date, merchant, note };
+}
+
+function TornEdge({ color, flip }) {
+  return <div className="torn-edge" style={{ "--tape-color": color, transform: flip ? "scaleY(-1)" : "none" }} />;
+}
+
+function CategoryChip({ cat, selected, onClick }) {
+  const Icon = cat.icon;
+  return (
+    <button type="button" onClick={onClick} className="flex items-center gap-1 px-3 py-1.5 rounded-full border-2 text-xs whitespace-nowrap flex-shrink-0"
+      style={{ borderColor: selected ? cat.color : RULE, color: selected ? cat.color : MUTED, background: selected ? cat.color + "18" : "transparent", transform: selected ? "rotate(-2deg)" : "none", transition: "transform 0.15s ease, background 0.15s ease", fontFamily: FONT_BODY }}>
+      <Icon size={12} />{cat.label}
+    </button>
+  );
+}
+
+function App() {
+  const [transactions, setTransactions] = useState([]);
+  const [settings, setSettings] = useState({ currency: "R" });
+  const [apiKey, setApiKey] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [globalError, setGlobalError] = useState(null);
+
+  const [view, setView] = useState("none");
+  const [formData, setFormData] = useState(null);
+  const [formError, setFormError] = useState(null);
+
+  const [scanning, setScanning] = useState(false);
+  const [scanImage, setScanImage] = useState(null);
+  const [scanError, setScanError] = useState(null);
+
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+
+  const [savedStamp, setSavedStamp] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try { const res = await window.storage.get("transactions"); setTransactions(res ? JSON.parse(res.value) : []); }
+      catch (e) { setTransactions([]); }
+      try { const res = await window.storage.get("settings"); setSettings(res ? JSON.parse(res.value) : { currency: "R" }); }
+      catch (e) { setSettings({ currency: "R" }); }
+      try { const res = await window.storage.get("anthropicApiKey"); setApiKey(res ? res.value : ""); }
+      catch (e) { setApiKey(""); }
+      setLoading(false);
+    })();
+  }, []);
+
+  async function persist(updatedList) {
+    setTransactions(updatedList);
+    try { await window.storage.set("transactions", JSON.stringify(updatedList)); }
+    catch (e) { setGlobalError("Couldn't save that change."); setTimeout(() => setGlobalError(null), 4000); }
+  }
+  async function updateCurrency(symbol) {
+    const next = { ...settings, currency: symbol };
+    setSettings(next);
+    try { await window.storage.set("settings", JSON.stringify(next)); } catch (e) {}
+  }
+  function cycleCurrency() {
+    const idx = CURRENCIES.indexOf(settings.currency);
+    updateCurrency(CURRENCIES[(idx + 1) % CURRENCIES.length]);
+  }
+  async function saveApiKey() {
+    const trimmed = keyDraft.trim();
+    setApiKey(trimmed);
+    try { await window.storage.set("anthropicApiKey", trimmed); } catch (e) {}
+    setShowKeyModal(false);
+  }
+
+  function openManual() {
+    setFormData({ id: null, amount: "", merchant: "", category: "other", date: todayStr(), note: "", source: "manual" });
+    setFormError(null); setView("manual");
+  }
+  function openEdit(tx) { setFormData({ ...tx, amount: String(tx.amount) }); setFormError(null); setView("edit"); }
+  function closeForm() { setView("none"); setFormData(null); setFormError(null); setScanImage(null); setScanError(null); }
+  function triggerSavedStamp() { setSavedStamp(true); setTimeout(() => setSavedStamp(false), 900); }
+
+  function handleSave() {
+    if (!formData.merchant || !formData.merchant.trim() || !formData.amount) { setFormError("Add an amount and a description."); return; }
+    const amountNum = parseFloat(formData.amount);
+    if (isNaN(amountNum) || amountNum <= 0) { setFormError("Amount should be a positive number."); return; }
+    const newTx = {
+      id: formData.id || makeId(), amount: amountNum, merchant: formData.merchant.trim(),
+      category: formData.category || "other", date: formData.date || todayStr(),
+      note: (formData.note || "").trim(), source: formData.source || "manual",
+      createdAt: formData.createdAt || new Date().toISOString(),
+    };
+    const updated = formData.id ? transactions.map((t) => (t.id === newTx.id ? newTx : t)) : [...transactions, newTx];
+    persist(updated); closeForm(); triggerSavedStamp();
+  }
+  function deleteTransaction(id) { persist(transactions.filter((t) => t.id !== id)); }
+
+  function handleFileChange(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setScanError(null);
+    if (!apiKey) {
+      setScanError("Add your Anthropic API key in Settings to enable scanning.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result;
+      setScanImage(dataUrl); setScanning(true);
+      try {
+        const raw = await scanReceiptImage(dataUrl, apiKey);
+        const n = normalizeExtracted(raw);
+        setFormData({ id: null, amount: n.amount ? String(n.amount) : "", merchant: n.merchant, category: n.category, date: n.date, note: n.note, source: "scan" });
+        setFormError(null); setView("review");
+      } catch (err) {
+        setScanError("Couldn't read that clearly \u2014 you can enter it by hand instead.");
+      } finally { setScanning(false); }
+    };
+    reader.onerror = () => { setScanning(false); setScanError("Could not open that image."); };
+    reader.readAsDataURL(file);
+  }
+
+  function handleClearAll() {
+    if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
+    persist([]); setConfirmClear(false);
+  }
+
+  const currentMonthKey = useMemo(() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }, []);
+  const monthLabel = useMemo(() => new Date().toLocaleDateString(undefined, { month: "long", year: "numeric" }), []);
+  const monthTransactions = useMemo(() => transactions.filter((t) => t.date && t.date.slice(0, 7) === currentMonthKey), [transactions, currentMonthKey]);
+  const monthTotal = useMemo(() => monthTransactions.reduce((s, t) => s + Number(t.amount || 0), 0), [monthTransactions]);
+  const categoryTotals = useMemo(() => {
+    const map = {};
+    monthTransactions.forEach((t) => { map[t.category] = (map[t.category] || 0) + Number(t.amount || 0); });
+    return Object.entries(map).map(([category, total]) => ({ category, total })).sort((a, b) => b.total - a.total);
+  }, [monthTransactions]);
+  const maxCategoryTotal = categoryTotals.length ? categoryTotals[0].total : 1;
+  const grouped = useMemo(() => {
+    const map = {};
+    [...transactions].sort((a, b) => (b.date + b.createdAt).localeCompare(a.date + a.createdAt)).forEach((t) => { (map[t.date] = map[t.date] || []).push(t); });
+    return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [transactions]);
+
+  return (
+    <div style={{ background: PAPER, minHeight: "100vh", fontFamily: FONT_BODY, color: INK }}>
+      <header style={{ background: DARK, position: "sticky", top: 0, zIndex: 10 }}>
+        <div className="px-4 pt-4 pb-3 flex items-start justify-between max-w-md mx-auto">
+          <div>
+            <p className="text-xs uppercase tracking-wide mb-1" style={{ color: "#F6F1E4AA", letterSpacing: "0.12em" }}>{monthLabel}</p>
+            <p style={{ fontFamily: FONT_MONO, fontSize: "2rem", fontWeight: 600, color: PAPER, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>
+              {formatMoney(monthTotal, settings.currency)}
+            </p>
+            <p className="text-xs mt-1" style={{ color: "#F6F1E488" }}>{monthTransactions.length} {monthTransactions.length === 1 ? "entry" : "entries"} this month</p>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button onClick={() => { setKeyDraft(apiKey); setShowKeyModal(true); }} title="API key settings"
+              className="rounded-full flex items-center justify-center" style={{ width: 36, height: 36, border: "1px solid #F6F1E440", color: apiKey ? AMBER : PAPER }}>
+              <IconKey size={15} />
+            </button>
+            <button onClick={cycleCurrency} title="Change currency symbol" className="rounded-full flex items-center justify-center"
+              style={{ width: 36, height: 36, border: "1px solid #F6F1E440", color: PAPER, fontFamily: FONT_MONO, fontSize: "0.9rem" }}>
+              {settings.currency}
+            </button>
+          </div>
+        </div>
+        <TornEdge color={DARK} />
+      </header>
+
+      <main className="px-4 pt-4 pb-24 max-w-md mx-auto">
+        {globalError && <div className="mb-4 px-3 py-2 rounded-xl text-xs" style={{ background: RUST + "15", color: RUST }}>{globalError}</div>}
+
+        <div className="flex gap-3 mb-5">
+          <button onClick={() => fileInputRef.current && fileInputRef.current.click()} className="flex-1 rounded-2xl flex flex-col items-center justify-center gap-1 py-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <IconCamera size={20} style={{ color: AMBER }} />
+            <span className="text-xs font-medium" style={{ color: INK }}>Scan a receipt</span>
+          </button>
+          <button onClick={openManual} className="flex-1 rounded-2xl flex flex-col items-center justify-center gap-1 py-4" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+            <IconPencil size={20} style={{ color: AMBER }} />
+            <span className="text-xs font-medium" style={{ color: INK }}>Write it in</span>
+          </button>
+          <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
+        </div>
+
+        {!apiKey && (
+          <div className="mb-5 px-3 py-3 rounded-xl flex items-start gap-2" style={{ background: AMBER + "12", border: `1px solid ${AMBER}30` }}>
+            <p className="text-xs flex-1" style={{ color: "#8A5A1E" }}>
+              Tap the key icon above and add your Anthropic API key to enable receipt scanning. Manual entry works either way.
+            </p>
+          </div>
+        )}
+
+        {scanning && (
+          <div className="relative mb-5 rounded-2xl overflow-hidden" style={{ border: `1px solid ${RULE}` }}>
+            {scanImage && <img src={scanImage} alt="Receipt preview" className="w-full block" style={{ maxHeight: 220, objectFit: "cover", filter: "grayscale(15%)" }} />}
+            <div className="scan-line" />
+            <div className="absolute bottom-0 left-0 right-0 px-3 py-2 flex items-center gap-2" style={{ background: "rgba(23,50,41,0.85)" }}>
+              <IconLoader size={12} className="animate-spin" style={{ color: PAPER }} />
+              <p className="text-xs" style={{ color: PAPER, fontFamily: FONT_MONO }}>Reading receipt…</p>
+            </div>
+          </div>
+        )}
+
+        {scanError && (
+          <div className="mb-5 px-3 py-3 rounded-xl flex items-start gap-2" style={{ background: RUST + "12", border: `1px solid ${RUST}30` }}>
+            <p className="text-xs flex-1" style={{ color: RUST }}>{scanError}</p>
+            <button onClick={() => setScanError(null)} style={{ color: RUST }}><IconX size={14} /></button>
+          </div>
+        )}
+
+        {categoryTotals.length > 0 && (
+          <div className="mb-6">
+            <p className="text-xs uppercase tracking-wide mb-2" style={{ color: MUTED, letterSpacing: "0.1em" }}>This month by category</p>
+            <div className="flex flex-col gap-2">
+              {categoryTotals.map((d) => {
+                const cat = CATEGORY_MAP[d.category] || CATEGORY_MAP.other;
+                const Icon = cat.icon;
+                const pct = Math.max(6, Math.round((d.total / maxCategoryTotal) * 100));
+                return (
+                  <div key={d.category} className="flex items-center gap-2">
+                    <Icon size={13} style={{ color: cat.color, flexShrink: 0 }} />
+                    <div className="flex-1 rounded-full" style={{ background: "#00000010", height: 6 }}>
+                      <div style={{ width: pct + "%", background: cat.color, height: "100%", borderRadius: 999 }} />
+                    </div>
+                    <span className="text-xs font-medium flex-shrink-0" style={{ fontFamily: FONT_MONO, color: INK, minWidth: "3.5rem", textAlign: "right" }}>
+                      {formatMoney(d.total, settings.currency)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-16" style={{ color: MUTED }}>
+            <IconLoader size={16} className="animate-spin" /><span className="text-sm">Loading your ledger…</span>
+          </div>
+        ) : grouped.length === 0 ? (
+          <div className="text-center py-16">
+            <IconReceipt size={26} style={{ color: MUTED, margin: "0 auto 10px" }} />
+            <p className="text-sm" style={{ color: MUTED }}>Nothing logged yet. Scan a receipt or write in your first spend.</p>
+          </div>
+        ) : (
+          grouped.map(([date, txs]) => (
+            <div key={date} className="mb-4">
+              <p className="text-xs uppercase tracking-wide mb-1" style={{ color: MUTED, fontFamily: FONT_MONO, letterSpacing: "0.08em" }}>{dateLabel(date)}</p>
+              <div className="rounded-2xl overflow-hidden" style={{ background: CARD, border: `1px solid ${RULE}` }}>
+                {txs.map((t, i) => {
+                  const cat = CATEGORY_MAP[t.category] || CATEGORY_MAP.other;
+                  const Icon = cat.icon;
+                  return (
+                    <div key={t.id} onClick={() => openEdit(t)} className="flex items-center gap-3 px-3 py-3" style={{ borderBottom: i < txs.length - 1 ? `1px solid ${RULE}` : "none", cursor: "pointer" }}>
+                      <div className="flex items-center justify-center rounded-full flex-shrink-0" style={{ width: 32, height: 32, background: cat.color + "1f" }}>
+                        <Icon size={16} style={{ color: cat.color }} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate" style={{ color: INK }}>{t.merchant}</p>
+                        <p className="text-xs truncate" style={{ color: MUTED }}>{cat.label}{t.note ? " \u00B7 " + t.note : ""}</p>
+                      </div>
+                      <p className="text-sm font-semibold flex-shrink-0" style={{ fontFamily: FONT_MONO, color: INK, fontVariantNumeric: "tabular-nums" }}>{formatMoney(t.amount, settings.currency)}</p>
+                      <button onClick={(e) => { e.stopPropagation(); deleteTransaction(t.id); }} aria-label={`Delete ${t.merchant}`} className="p-1 flex-shrink-0" style={{ color: MUTED }}>
+                        <IconTrash size={14} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))
+        )}
+
+        {!loading && (
+          <div className="mt-8 text-center">
+            <button onClick={handleClearAll} className="text-xs underline" style={{ color: confirmClear ? RUST : MUTED }}>
+              {confirmClear ? "Tap again to erase everything" : "Clear all data"}
+            </button>
+          </div>
+        )}
+      </main>
+
+      {view !== "none" && formData && (
+        <div className="fixed inset-0 flex items-end" style={{ background: "rgba(23,50,41,0.45)", zIndex: 40 }} onClick={closeForm}>
+          <div className="sheet-anim w-full max-w-md mx-auto" style={{ animation: "sheetUp 0.25s ease-out" }} onClick={(e) => e.stopPropagation()}>
+            <TornEdge color={CARD} flip />
+            <div className="px-5 pb-8 pt-2" style={{ background: CARD, maxHeight: "80vh", overflowY: "auto" }}>
+              <div className="flex items-center justify-between mb-4 pt-2">
+                <p className="text-sm font-semibold" style={{ color: INK }}>{view === "manual" ? "Write it in" : view === "review" ? "Confirm the scan" : "Edit entry"}</p>
+                <button onClick={closeForm} style={{ color: MUTED }} aria-label="Close"><IconX size={18} /></button>
+              </div>
+
+              {view === "review" && scanImage && (
+                <div className="mb-4 rounded-xl overflow-hidden" style={{ border: `1px solid ${RULE}` }}>
+                  <img src={scanImage} alt="Scanned receipt" className="w-full block" style={{ maxHeight: 140, objectFit: "cover" }} />
+                  <p className="text-xs px-2 py-1.5" style={{ color: MUTED, background: PAPER }}>Scanned — check the details before saving</p>
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 mb-4">
+                <span style={{ fontFamily: FONT_MONO, fontSize: "1.6rem", color: INK }}>{settings.currency}</span>
+                <input type="number" inputMode="decimal" step="0.01" autoFocus={view === "manual"} value={formData.amount}
+                  onChange={(e) => setFormData({ ...formData, amount: e.target.value })} placeholder="0.00"
+                  className="flex-1 bg-transparent outline-none" style={{ fontFamily: FONT_MONO, fontSize: "1.6rem", color: INK, fontVariantNumeric: "tabular-nums" }} />
+              </div>
+
+              <input type="text" placeholder="Where'd it go?" value={formData.merchant} onChange={(e) => setFormData({ ...formData, merchant: e.target.value })}
+                className="w-full mb-4 px-3 py-2 rounded-xl text-sm" style={{ background: PAPER, border: `1px solid ${RULE}`, color: INK }} />
+
+              <div className="flex gap-2 overflow-x-auto mb-4 pb-1">
+                {CATEGORIES.map((c) => <CategoryChip key={c.key} cat={c} selected={formData.category === c.key} onClick={() => setFormData({ ...formData, category: c.key })} />)}
+              </div>
+
+              <input type="date" value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })}
+                className="w-full mb-4 px-3 py-2 rounded-xl text-sm" style={{ background: PAPER, border: `1px solid ${RULE}`, color: INK, fontFamily: FONT_MONO }} />
+
+              <input type="text" placeholder="Note (optional)" value={formData.note} onChange={(e) => setFormData({ ...formData, note: e.target.value })}
+                className="w-full mb-4 px-3 py-2 rounded-xl text-sm" style={{ background: PAPER, border: `1px solid ${RULE}`, color: INK }} />
+
+              {formError && <p className="text-xs mb-3" style={{ color: RUST }}>{formError}</p>}
+
+              <div className="flex gap-3">
+                <button onClick={closeForm} className="flex-1 py-3 rounded-xl text-sm font-medium" style={{ background: "transparent", border: `1px solid ${RULE}`, color: MUTED }}>Cancel</button>
+                <button onClick={handleSave} className="flex-1 py-3 rounded-xl text-sm font-semibold" style={{ background: AMBER, color: PAPER }}>Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showKeyModal && (
+        <div className="fixed inset-0 flex items-end" style={{ background: "rgba(23,50,41,0.45)", zIndex: 40 }} onClick={() => setShowKeyModal(false)}>
+          <div className="w-full max-w-md mx-auto" style={{ animation: "sheetUp 0.25s ease-out" }} onClick={(e) => e.stopPropagation()}>
+            <TornEdge color={CARD} flip />
+            <div className="px-5 pb-8 pt-2" style={{ background: CARD }}>
+              <div className="flex items-center justify-between mb-3 pt-2">
+                <p className="text-sm font-semibold" style={{ color: INK }}>Anthropic API key</p>
+                <button onClick={() => setShowKeyModal(false)} style={{ color: MUTED }} aria-label="Close"><IconX size={18} /></button>
+              </div>
+              <p className="text-xs mb-3" style={{ color: MUTED }}>
+                Needed only for receipt scanning. Get one at console.anthropic.com — it's stored just in this browser, and using it here means it travels with each scan request, so keep this page's link private.
+              </p>
+              <input type="password" placeholder="sk-ant-..." value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)}
+                className="w-full mb-4 px-3 py-2 rounded-xl text-sm" style={{ background: PAPER, border: `1px solid ${RULE}`, color: INK, fontFamily: FONT_MONO }} />
+              <div className="flex gap-3">
+                <button onClick={() => setShowKeyModal(false)} className="flex-1 py-3 rounded-xl text-sm font-medium" style={{ background: "transparent", border: `1px solid ${RULE}`, color: MUTED }}>Cancel</button>
+                <button onClick={saveApiKey} className="flex-1 py-3 rounded-xl text-sm font-semibold" style={{ background: AMBER, color: PAPER }}>Save key</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {savedStamp && (
+        <div className="fixed inset-0 flex items-center justify-center pointer-events-none" style={{ zIndex: 50 }}>
+          <div className="stamp-pop" style={{ background: AMBER, color: PAPER, padding: "10px 26px", borderRadius: 8, fontFamily: FONT_MONO, fontWeight: 700, letterSpacing: "0.14em", textTransform: "uppercase", fontSize: "0.85rem", border: `3px solid ${PAPER}`, animation: "stampIn 0.5s ease-out forwards" }}>
+            Saved
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const rootEl = document.getElementById("root");
+try {
+  if (ReactDOM.createRoot) {
+    ReactDOM.createRoot(rootEl).render(<App />);
+  } else {
+    ReactDOM.render(<App />, rootEl);
+  }
+  rootEl.dataset.mounted = "1";
+} catch (err) {
+  console.error(err);
+  rootEl.innerHTML =
+    '<div style="padding:24px;font-family:system-ui,sans-serif;color:#8B3A3A;">' +
+    "Something didn't load correctly: " + (err && err.message ? err.message : "unknown error") +
+    "<br/><br/>Try refreshing, or check that all three files (index.html, manifest.json, icon.svg) uploaded correctly.</div>";
+}
+</script>
+
+<script>
+  (function () {
+    var source = document.getElementById("app-source").textContent;
+    var output = Babel.transform(source, {
+      presets: [["react", { runtime: "classic" }]],
+    }).code;
+    var script = document.createElement("script");
+    script.textContent = output;
+    document.body.appendChild(script);
+  })();
+</script>
+</body>
+</html>
